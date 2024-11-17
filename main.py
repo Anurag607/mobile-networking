@@ -23,6 +23,7 @@ class CryptographicHelper:
 
 class NetworkHelper:
     assigned_ips = set()
+    routes = []
 
     @staticmethod
     def assign_ip(entity_type):
@@ -37,7 +38,6 @@ class NetworkHelper:
 
         network_id = network_id_map[entity_type]
 
-        # Generate a unique IP address
         while True:
             ip_address = f"{network_id}.{secrets.randbelow(255)}"
             if ip_address not in NetworkHelper.assigned_ips:
@@ -56,9 +56,12 @@ class NetworkHelper:
 
     @staticmethod
     def add_route(destination, gateway):
+        """Adds a route to the route table and executes the command."""
         try:
-            command = ["sudo", "route", "-n", "add", destination, gateway] # For Mac
-            # command = ["sudo", "ip", "route", "add", destination, "via", gateway] # For Linux
+            NetworkHelper.routes.append({"destination": destination, "gateway": gateway})
+
+            command = ["sudo", "route", "-n", "add", destination, gateway]  # For Mac
+            # command = ["sudo", "ip", "route", "add", destination, "via", gateway]  # For Linux
             subprocess.run(command, check=True)
             print(f"Successfully added route to {destination} via {gateway}")
         except subprocess.CalledProcessError as e:
@@ -70,8 +73,11 @@ class NetworkHelper:
     def remove_route(destination):
         """Remove a network route using the macOS 'route delete' command."""
         try:
-            command = ["sudo", "route", "-n", "delete", destination] # For Mac
-            # command = ["sudo", "ip", "route", "del", destination] # For Linux
+            # Remove the route from stored routes
+            NetworkHelper.routes = [route for route in NetworkHelper.routes if route["destination"] != destination]
+
+            command = ["sudo", "route", "-n", "delete", destination]  # For Mac
+            # command = ["sudo", "ip", "route", "del", destination]  # For Linux
             subprocess.run(command, check=True)
             print(f"Successfully removed route to {destination}")
         except subprocess.CalledProcessError as e:
@@ -79,6 +85,18 @@ class NetworkHelper:
         except Exception as e:
             print(f"Unexpected error: {e}")
 
+    @staticmethod
+    def print_routes():
+        """Prints all the established routes."""
+        if not NetworkHelper.routes:
+            print("No routes established yet.")
+            return
+
+        print("\n--- Established Routes ---")
+        for route in NetworkHelper.routes:
+            print(f"Destination: {route['destination']} -> Gateway: {route['gateway']}")
+        print("\n")
+        
 # ------------------------------------------------------------------------------
 
 class Registration:
@@ -138,6 +156,8 @@ class MobileNode:
         }
         registration = Registration("registration", ha, request_data)
         self.re_register_with_original_ha(fa)
+
+        NetworkHelper.add_route(self.coa, ha.ip_address)
         return fa.handle_registration_request(self, ha, registration)
 
 # ------------------------------------------------------------------------------
@@ -150,6 +170,10 @@ class ForeignAgent:
 
     def handle_registration_request(self, mn, ha, registration):
         registration.add_nonce(self.nonce_fa)
+        
+        NetworkHelper.add_route(mn.coa, self.ip_address)
+        NetworkHelper.add_route(ha.ip_address, self.ip_address)
+
         return ha.process_registration(self, mn, registration)
 
 # ------------------------------------------------------------------------------
@@ -178,7 +202,12 @@ class HomeAgent:
                 "foreign_agent": fa.ip_address
             }
             self.bindings[mn.identity] = binding
+
+            NetworkHelper.add_route(fa.ip_address, self.ip_address)
             NetworkHelper.add_route(mn.coa, self.ip_address)
+            NetworkHelper.add_route(self.ip_address, fa.ip_address)
+            
+            print(f"Successfully registered Mobile Node {mn.identity} with Home Agent {self.identity}.")
             return {"status": "success", "binding": self.bindings[mn.identity]}
         else:
             raise Exception("Invalid registration data")
@@ -186,15 +215,32 @@ class HomeAgent:
 # ------------------------------------------------------------------------------
         
 def create_mesh_topology():
-    """Establishes a mesh topology among all Home Agents."""
-    print("\nCreating Mesh Topology Between Home Agents...")
+    """Establishes a fully connected mesh topology among all Home Agents, and adds routes between HAs and FAs."""
+    print("\nCreating Full Mesh Topology Between Home Agents...")
+    
     for ha_id, ha in ha_registry.items():
         ha.peers = set()
+        
         for peer_id, peer_ha in ha_registry.items():
             if ha_id != peer_id:
                 ha.peers.add(peer_id)
+                
+                NetworkHelper.add_route(peer_ha.ip_address, ha.ip_address)
+                NetworkHelper.add_route(ha.ip_address, peer_ha.ip_address)
+
                 print(f"HA {ha_id} (IP: {ha.ip_address}) connected to HA {peer_id} (IP: {peer_ha.ip_address})")
-    print("Mesh topology created successfully.\n")
+
+        for index in range(len(ha_registry)):
+            ha_id, ha = list(ha_registry.items())[index]
+            fa_id, fa = list(fa_registry.items())[index]
+            
+            NetworkHelper.add_route(fa.ip_address, ha.ip_address)
+            NetworkHelper.add_route(ha.ip_address, fa.ip_address)
+            
+            print(f"HA {ha_id} (IP: {ha.ip_address}) connected to FA {fa_id} (IP: {fa.ip_address})")
+                
+    print("Full mesh topology created successfully, including routes to Foreign Agents.\n")
+
     
 def print_mesh_topology():
     """Prints the mesh topology of the Home Agents."""
@@ -408,7 +454,8 @@ def menu():
         print("7. Show HA NAT Tables")
         print("8. Print Mesh Topology")
         print("9. Ping Mobile Node")
-        print("10. Exit")
+        print("10. Print All Established Routes")
+        print("11. Exit")
 
         choice = input("Enter your choice: ").strip()
         if choice == "1":
@@ -430,6 +477,8 @@ def menu():
         elif choice == "9":
             ping_mobile_node()
         elif choice == "10":
+            NetworkHelper.print_routes()
+        elif choice == "11":
             print("Exiting...")
             break
         else:
